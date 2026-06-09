@@ -29,7 +29,13 @@ README.md                user-facing docs
 
 1. Hooks in `~/.claude/settings.json` run `claude-tmux-state <state>`:
    `SessionStart`/`UserPromptSubmit`/`PostToolUse`→`running`, `Notification`→`asking`,
-   `Stop`→`idle`, `SessionEnd`→`clear`.
+   `Stop`→`idle`, `SessionEnd`→`clear`. **The `Notification`→`asking` mapping is
+   filtered** (section 0 of `claude-tmux-state`): Claude Code fires `Notification`
+   for *both* a real prompt and the 60s "waiting for your input" idle timeout, so a
+   `Notification` is dropped when the pane is already `idle` (a stopped Claude can't
+   be blocked on you) or when the payload message says it's just waiting for input.
+   Without this, a finished, unattended session falsely flips to red ~60s after it
+   stops. Don't naively re-map `Notification`→`asking` without keeping this guard.
 2. `claude-tmux-state` writes `~/.cache/claude-tmux/pane-<id>` (keyed by `$TMUX_PANE`),
    file format **`<state>\t<window_id>`**, and sets `window-status-style` on its window
    (aggregate of all Claude panes in that window, priority asking > running > idle).

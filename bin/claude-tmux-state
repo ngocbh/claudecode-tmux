@@ -7,6 +7,9 @@
 # Usage: claude-tmux-state <running|asking|idle|clear>
 #   Wired to Claude Code hooks (SessionStart/UserPromptSubmit/PostToolUse ->
 #   running, Notification -> asking, Stop -> idle, SessionEnd -> clear).
+#   Note: a Notification fires both for a genuine prompt AND for the 60s
+#   "waiting for your input" idle timeout; the latter is filtered out below so a
+#   finished, unattended session doesn't falsely turn red (see "asking" guard).
 #
 # Keyed by tmux pane id ($TMUX_PANE). State file format: "<state>\t<window_id>"
 # — the window id lets claude-tmux-status re-tint the right window even after the
@@ -26,6 +29,22 @@ _cfg="${XDG_CONFIG_HOME:-$HOME/.config}/claude-tmux/config"
 id=$(printf '%s' "$TMUX_PANE" | tr -d '%')
 f="$dir/pane-$id"
 state="$1"
+
+# --- 0. drop the idle-timeout Notification (false "asking") ------------------
+# Claude Code fires Notification both for a genuine attention prompt (permission
+# / question) AND for the 60s "waiting for your input" idle timeout. Only the
+# former should turn the tab red. Treat a Notification as the idle timeout — and
+# no-op — when either:
+#   (a) the hook payload on stdin says it's just waiting for input, or
+#   (b) the pane is already idle: a stopped Claude isn't running anything, so it
+#       cannot be genuinely blocked on you — the notification must be the timer.
+# (a) is best-effort (message wording may change); (b) is the reliable net.
+if [ "$state" = "asking" ]; then
+  _msg=""
+  [ -t 0 ] || _msg=$(cat 2>/dev/null)
+  case "$_msg" in *[Ww]aiting?for?your?input*) exit 0 ;; esac
+  [ "$(cut -f1 "$f" 2>/dev/null)" = idle ] && exit 0
+fi
 
 # --- 1. update the per-pane state file ---------------------------------------
 if [ "$state" = "clear" ]; then

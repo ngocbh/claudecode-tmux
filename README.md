@@ -1,23 +1,27 @@
 # claude-tmux
 
-See, at a glance, what every [Claude Code](https://docs.claude.com/en/docs/claude-code)
-session running in your **tmux** is doing — working, waiting on you, or idle —
-across all your sessions.
+Run several [Claude Code](https://docs.claude.com/en/docs/claude-code) sessions
+at once and stop babysitting them. Kick off work in a handful of **tmux** panes,
+go heads-down in one, and let the status bar tell you — without switching tabs —
+the moment another session **finishes** or **gets blocked waiting on your
+input**, so you know exactly which tab to jump to next.
 
-- **Window-tab tint** for the session you're in: the tab of any *inactive*
-  window running Claude turns **orange** while it works and **red** while it's
-  asking you something.
-- **Status-right chips** for your *other* sessions: a compact
-  `[win]name●` badge per Claude (amber ● working · red ? needs-you · ✓ idle),
-  so you can watch sessions you're not currently looking at.
+- **Window-tab tint** for the sessions you're *not* looking at: the tab of any
+  inactive window running Claude turns **orange** while it works and **red** the
+  instant it's waiting on you — so a tab lighting up red is your cue to switch.
+- **Status-right chips** for your *other* sessions: a compact `[win]name●` badge
+  per Claude (amber ● working · red ? needs-you · ✓ done), so you can watch every
+  session you're not currently in from one place.
 
-It's driven by Claude Code **hooks** (no polling of the TUI), so state is exact.
+It's driven by Claude Code **hooks** (no polling of the TUI), so the state is
+exact: a session flips to *needs-you* the moment it actually asks, and to *done*
+the moment it actually stops — no guessing, no missed prompts.
 
 ```
  ┌─ window tabs (current session) ──────┐         ┌─ other sessions ─┐
  │ 0:editor  1:logs  [2:claude]●        │   ...   │ [3]api●  [1]docs✓ │
  └──────────────────────────────────────┘         └──────────────────┘
-        orange tab = Claude busy in window 2          chips for other sessions
+        orange = busy · red = waiting on you       ✓ done · ? needs you · ● working
 ```
 
 ## Install
@@ -79,6 +83,13 @@ to `~/.cache/claude-tmux/pane-<pane-id>` (keyed by `$TMUX_PANE`) and tints its
 window tab. `claude-tmux-status` runs from `status-right` every second,
 aggregating all state files into the cross-session chips (skipping the session
 you're viewing, which the tab tint already covers).
+
+**Why a finished session doesn't turn red:** Claude Code fires `Notification`
+both for a real prompt *and* for the 60-second "waiting for your input" idle
+timeout. To keep red meaning *"needs you"* (and not *"done, and you haven't come
+back yet"*), `claude-tmux-state` drops a `Notification` that arrives while the
+pane is already `idle` — a stopped Claude isn't running anything, so it can't be
+genuinely blocked on you.
 
 ### Stale sessions
 State self-heals: a closed pane/window, or a Claude that crashed back to a shell,
