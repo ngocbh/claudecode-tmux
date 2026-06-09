@@ -26,6 +26,7 @@ CT_ASK_TAB='fg=#1a1b26,bg=#f7768e,bold'       # window-tab tint: needs input
 CT_ICON_RUN='●'
 CT_ICON_ASK='?'
 CT_ICON_IDLE='✓'
+CT_CLICKABLE=''                                # 1|true|yes|on => chips clickable
 _cfg="${XDG_CONFIG_HOME:-$HOME/.config}/claude-tmux/config"
 [ -r "$_cfg" ] && . "$_cfg"
 # ----------------------------------------------------------------------------
@@ -94,6 +95,14 @@ for f in "$dir"/pane-*; do
     running) seg="#[$CT_RUN_CHIP][$win]$sess$CT_ICON_RUN#[default]" ;;
     asking)  seg="#[$CT_ASK_CHIP][$win]$sess$CT_ICON_ASK#[default]" ;;
     *)       seg="#[$CT_IDLE_CHIP][$win]$sess$CT_ICON_IDLE#[default]" ;;
+  esac
+  # Make the chip a click target when enabled: wrap it in a tmux range tagged
+  # with this Claude's window id ("@N"). The MouseDown1Status binding (in
+  # claude-tmux-click.tmux) passes the tag to claude-tmux-jump, which switches
+  # there. The trailing separator stays outside the range, so only the chip is
+  # clickable.
+  case "$CT_CLICKABLE" in
+    1 | true | yes | on) seg="#[range=user|ct$wid]$seg#[norange]" ;;
   esac
   out="$out $seg"
 done

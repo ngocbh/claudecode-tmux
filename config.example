@@ -14,3 +14,11 @@
 # --- window-tab tint (shown on the focused session's inactive tabs) ----------
 # CT_RUN_TAB='fg=#1a1b26,bg=#ff9e64,bold'       # working
 # CT_ASK_TAB='fg=#1a1b26,bg=#f7768e,bold'       # needs you
+
+# --- clickable chips (tmux 3.2+) ---------------------------------------------
+# Make the status-right chips clickable: left-click a chip to switch to that
+# session and select its window. Accepts 1/true/yes/on. Enabling this turns ON
+# tmux mouse mode (`set -g mouse on`), which changes terminal text selection
+# (hold Shift to select/copy text, scroll enters copy-mode). Reload tmux after
+# changing (`tmux source-file ~/.tmux.conf`). Off by default.
+# CT_CLICKABLE=1

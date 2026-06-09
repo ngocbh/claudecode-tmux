@@ -12,7 +12,7 @@ MARK_END="# <<< claude-tmux <<<"
 log() { printf '\033[36m[claude-tmux]\033[0m %s\n' "$1"; }
 
 # scripts
-rm -f "$BIN_DIR/claude-tmux-status" "$BIN_DIR/claude-tmux-state"
+rm -f "$BIN_DIR/claude-tmux-status" "$BIN_DIR/claude-tmux-state" "$BIN_DIR/claude-tmux-jump"
 log "removed scripts from $BIN_DIR"
 
 # tmux source block (between markers)
@@ -31,6 +31,10 @@ if command -v tmux >/dev/null 2>&1 && tmux info >/dev/null 2>&1; then
   cur=$(tmux show -gv status-right 2>/dev/null || true)
   tmux set -g status-right "$(printf '%s' "$cur" | sed 's|#([^)]*claude-tmux-status[^)]*)||g')" 2>/dev/null || true
   tmux set -gu @claude_tmux_base 2>/dev/null || true   # legacy installs
+  # Clickable chips overrode MouseDown1Status — restore tmux's default tab-click.
+  # (mouse setting left as-is; we don't know if the user wanted it on.)
+  tmux bind-key -n MouseDown1Status select-window -t = 2>/dev/null || true
+  tmux unbind-key -n MouseDown1StatusRight 2>/dev/null || true   # legacy dev binding
   tmux source-file "$TMUX_CONF" >/dev/null 2>&1 || true
 fi
 rm -rf "$CFG_DIR"

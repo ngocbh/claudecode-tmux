@@ -13,3 +13,11 @@ set -g status-right-length 200
 # ~/.tmux.conf resets it before we run, so reloads never stack.
 # Want the chip on the RIGHT instead? use "$cur${h}(@STATUS_CMD@)".
 run-shell -b 'h=$(printf "\043"); cur=$(tmux show -gv status-right); case "$cur" in *claude-tmux-status*) exit 0 ;; esac; tmux set -g status-right "${h}(@STATUS_CMD@)$cur"'
+
+# Clickable chips (opt-in via CT_CLICKABLE; tmux 3.2+). When enabled, source the
+# click bindings (claude-tmux-click.tmux: mouse on + a MouseDown1Status handler that
+# jumps on a chip range and otherwise keeps tmux's default window-tab select). The
+# gate is an if-shell that sources the config and tests the toggle; the bindings live
+# in a separate plain file (see that file's header for why) rather than being built
+# here inside a run-shell. Idempotent — re-sourcing just re-applies set/bind.
+if-shell '. "${XDG_CONFIG_HOME:-$HOME/.config}/claude-tmux/config" 2>/dev/null; case "${CT_CLICKABLE:-}" in 1|true|yes|on) exit 0 ;; *) exit 1 ;; esac' 'source-file @CLICK_CONF@'

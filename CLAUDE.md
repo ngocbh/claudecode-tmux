@@ -18,7 +18,9 @@ installing into tmux and watching the status bar.
 ```
 bin/claude-tmux-state    writer  — called by hooks; writes state + tints the window tab
 bin/claude-tmux-status   reader  — called by tmux status-right via #(); renders chips, self-heals
-tmux/claude-tmux.tmux    snippet template (@STATUS_CMD@ substituted at install)
+bin/claude-tmux-jump     click handler — invoked from the MouseDown1Status binding (clickable chips); switches to a chip's session/window
+tmux/claude-tmux.tmux    snippet template (@STATUS_CMD@ / @CLICK_CONF@ substituted at install)
+tmux/claude-tmux-click.tmux  clickable-chip bindings template (@JUMP_CMD@ substituted); sourced by the snippet only when CT_CLICKABLE is on
 install.sh / uninstall.sh idempotent, non-destructive (curl|sh self-bootstraps via git clone)
 config.example           every tunable; copied to ~/.config/claude-tmux/config on install
 Makefile                 `make install` / `make uninstall`
@@ -42,6 +44,17 @@ README.md                user-facing docs
 3. `claude-tmux-status` runs from `status-right` every second: reads all state files,
    prunes stale ones, and prints a chip per Claude **for sessions not currently attached**
    (the focused session is covered by the tab tint).
+4. **Clickable chips (opt-in, `CT_CLICKABLE`).** When enabled, `claude-tmux-status`
+   wraps each chip in a tmux range tagged with the chip's window id —
+   `#[range=user|ct<window_id>]…#[norange]` — and the snippet sources
+   `claude-tmux-click.tmux`, which does (a) `set -g mouse on` and (b) binds
+   **`MouseDown1Status`** (see the invariant below for why not `StatusRight`) to an
+   `if-shell` that jumps when the click landed on a `ct@…` chip and otherwise runs
+   tmux's default `select-window -t =`. On a chip click tmux sets
+   `#{mouse_status_range}` to the tag (e.g. `ct@5`); `claude-tmux-jump` strips `ct`,
+   resolves the window id to its session, and does `switch-client` + `select-window`.
+   Default off; off = byte-for-byte the old behavior (no ranges emitted, click file
+   not sourced, no mouse/binding touched).
 
 ## Conventions / invariants — preserve these
 
@@ -67,6 +80,43 @@ README.md                user-facing docs
   ⚠️ The window-tab colors (`CT_RUN_TAB`, `CT_ASK_TAB`) are defined in **both**
   `bin/claude-tmux-state` and `bin/claude-tmux-status` (the latter re-tints during
   self-heal). Keep the two in sync, and keep `config.example` listing every knob.
+- **Clickable chips are opt-in and must stay non-destructive.** `CT_CLICKABLE`
+  (default empty = off) is read in two places: `claude-tmux-status` (decides
+  whether to emit the `#[range=user|ct<window_id>]` wrapper) and the snippet's
+  `if-shell` gate (sources the config and, only when enabled, `source-file`s
+  `claude-tmux-click.tmux`, which runs `set -g mouse on` + binds the click). Both
+  gate on the **same truthiness set** `1|true|yes|on` — so `CT_CLICKABLE=0`
+  disables (don't switch either to a bare `-n`/non-empty test, which would read
+  `0` as on). Don't move the mouse-enable outside the toggle: flipping a user's
+  `mouse` setting unprompted is the one intrusive thing we promised not to do by
+  default.
+- **Chip range encoding is `ct<window_id>`** (e.g. `ct@5`). The reader builds it
+  from the live pane map's window id; `claude-tmux-jump` strips the `ct` tag and
+  trusts the remaining `@N` as a server-unique window id (so it resolves the
+  session even from another one — don't switch to a `session:window` string,
+  which breaks on colons in session names and on renames).
+- **Bind `MouseDown1Status`, NOT `MouseDown1StatusRight`** — even though the chips
+  render in `status-right`. tmux fires `MouseDown1Status` for a click on *any*
+  status range — our chips (`range=user|ct@…`) AND the default window tabs
+  (`range=window`) — and never the region-specific `StatusRight`/`StatusLeft` key.
+  (Verified empirically: bind all four `MouseDown1Status*` keys to log
+  `#{mouse_status_range}`; a chip click logs `KEY=Status msr=[ct@…]`.) Because we
+  share the key with tmux's tab-click default, the binding **must** branch:
+  `if-shell -F '#{m:ct@*,#{mouse_status_range}}'` → jump, else `select-window -t =`.
+  Never bind `MouseDown1Status` to a bare jump — that silently kills clicking your
+  own window tabs. The `select-window -t =` fallback (`=` = clicked window) only
+  resolves as a native tmux command in the key's command queue, so it must stay in
+  the binding, not inside the jump subprocess.
+- **The click bindings live in their own sourced file (`claude-tmux-click.tmux`),
+  not inside a `run-shell`.** tmux format-expands `#{…}` in a `run-shell` argument
+  before the shell runs, which would blow away `#{mouse_status_range}`/`#{client_name}`
+  at bind time (the symptom: `list-keys` shows `claude-tmux-jump ` with no arg).
+  Building them in a plain sourced file keeps the formats verbatim until a click.
+  `@JUMP_CMD@` is substituted into that file (absolute path, so it works regardless
+  of PATH in tmux's shell); `@CLICK_CONF@` is substituted into the snippet's
+  `source-file`. The snippet gates the source with `if-shell` reading `CT_CLICKABLE`
+  from config. Uninstall restores the default `MouseDown1Status select-window -t =`
+  but leaves the `mouse` option as the user had it.
 - **Window-tint recompute logic is duplicated**: `claude-tmux-state` section 2 and
   `claude-tmux-status`'s `retint_window()`. Change both together.
 - **Self-healing prune** (in `claude-tmux-status`): a state file is dropped when its
@@ -86,6 +136,25 @@ README.md                user-facing docs
   colors (the tmux default does respect the style).
 - `status-interval` is integer seconds; **1 is the floor** (no sub-second polling). The
   writer calls `tmux refresh-client -S` for snappier same-client updates.
+- `#[range=...]` directives **are honored from `#()` command output**, not just from
+  static format strings (same parser as the `#[fg=...]` we already emit) — but range
+  *position* tracking from `#()` was buggy in old tmux; it's reliable on **3.2+**.
+  That's the floor for clickable chips. `#{mouse_status_range}` (the user range under
+  the click) and the `StatusLeft`/`StatusRight` mouse keys are all 3.0+.
+- **Clicks need `mouse on`.** With mouse off tmux never sees status clicks (the
+  terminal handles selection), so the binding is inert — that's why clickable chips
+  are gated behind a toggle that also enables mouse.
+- **A status range click fires `MouseDown1Status`, not the region key.** This is the
+  single most important clickable-chips fact (see the invariant above): the chips are
+  in `status-right`, yet the click is delivered on `MouseDown1Status`, the same key as
+  the window tabs. So the binding is shared and must branch (jump vs. default
+  `select-window`). To debug which key/range a click produces, temporarily bind all of
+  `MouseDown1Status{,Left,Right,Default}` to `run-shell "printf 'KEY=… msr=[%s]\n'
+  '#{mouse_status_range}' >> /tmp/log"` and click — but **restore the default
+  `bind -n MouseDown1Status select-window -t =` afterward**, or you've broken tab
+  clicking. Verify the real binding with `tmux list-keys -T root MouseDown1Status` —
+  the stored command must still show `#{mouse_status_range}` (if it shows an empty arg,
+  a `run-shell` ate the format; keep the bindings in the plain sourced file).
 
 ## Verifying a change
 
@@ -105,7 +174,9 @@ There is no CI. Before considering a change done:
   Check: re-running install doesn't duplicate markers/hooks; unrelated hooks survive;
   uninstall removes everything it added and nothing it didn't.
 - Live check: install for real, run `claude` in a tmux pane, confirm the tab tints and a
-  chip appears from another session.
+  chip appears from another session. For clickable chips: set `CT_CLICKABLE=1`, reload
+  tmux, and confirm a left-click on a chip switches to that session's window (and that
+  the default window-tab click still works).
 
 ## Docs upkeep
 

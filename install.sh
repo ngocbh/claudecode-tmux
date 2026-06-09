@@ -39,13 +39,18 @@ command -v tmux >/dev/null 2>&1 || err "tmux not found on PATH (install it; the 
 # --- 1. scripts -------------------------------------------------------------
 log "installing scripts -> $BIN_DIR"
 mkdir -p "$BIN_DIR"
-cp "$SRC/bin/claude-tmux-status" "$SRC/bin/claude-tmux-state" "$BIN_DIR/"
-chmod +x "$BIN_DIR/claude-tmux-status" "$BIN_DIR/claude-tmux-state"
+cp "$SRC/bin/claude-tmux-status" "$SRC/bin/claude-tmux-state" "$SRC/bin/claude-tmux-jump" "$BIN_DIR/"
+chmod +x "$BIN_DIR/claude-tmux-status" "$BIN_DIR/claude-tmux-state" "$BIN_DIR/claude-tmux-jump"
 
 # --- 2. tmux snippet + source line in ~/.tmux.conf --------------------------
 log "writing tmux snippet -> $SNIPPET"
 mkdir -p "$CFG_DIR"
-sed "s|@STATUS_CMD@|$BIN_DIR/claude-tmux-status|g" "$SRC/tmux/claude-tmux.tmux" >"$SNIPPET"
+CLICK_CONF="$CFG_DIR/claude-tmux-click.tmux"
+sed -e "s|@STATUS_CMD@|$BIN_DIR/claude-tmux-status|g" \
+    -e "s|@CLICK_CONF@|$CLICK_CONF|g" \
+    "$SRC/tmux/claude-tmux.tmux" >"$SNIPPET"
+sed "s|@JUMP_CMD@|$BIN_DIR/claude-tmux-jump|g" \
+    "$SRC/tmux/claude-tmux-click.tmux" >"$CLICK_CONF"
 [ -f "$CFG_DIR/config" ] || cp "$SRC/config.example" "$CFG_DIR/config" 2>/dev/null || true
 
 touch "$TMUX_CONF"

@@ -50,8 +50,9 @@ update after `git pull`).
 ## What it touches
 | Path | Change |
 |------|--------|
-| `~/.local/bin/claude-tmux-{state,status}` | the two scripts |
+| `~/.local/bin/claude-tmux-{state,status,jump}` | the scripts (`jump` only used by clickable chips) |
 | `~/.config/claude-tmux/claude-tmux.tmux` | generated tmux snippet (sourced) |
+| `~/.config/claude-tmux/claude-tmux-click.tmux` | clickable-chip bindings (sourced only when `CT_CLICKABLE=1`) |
 | `~/.config/claude-tmux/config` | your color/icon overrides (created from `config.example`) |
 | `~/.tmux.conf` | a fenced `source-file` line (between `# >>> claude-tmux >>>` markers) |
 | `~/.claude/settings.json` | `hooks` entries (merged with `jq`, never clobbered) |
@@ -74,6 +75,20 @@ CT_ICON_RUN='▶'
 
 See [`config.example`](config.example) for every knob. Changes show on the next
 status refresh (~1s); no reinstall needed.
+
+### Clickable chips (opt-in)
+
+Set `CT_CLICKABLE=1` to make the chips clickable — **left-click a chip to switch
+to that session and select its window**, so you can jump to the Claude that needs
+you without typing a `tmux` command. Then reload tmux (`tmux source-file
+~/.tmux.conf`).
+
+Needs **tmux 3.2+**, and enabling it turns on tmux **mouse mode** (`set -g mouse
+on`) — that's what lets tmux capture the click, but it also changes terminal
+behavior: drag-to-select text now needs **Shift**, and scrolling enters
+copy-mode. That's why it's off by default. (Your own window *tabs* are already
+clickable once mouse mode is on — that's tmux's built-in behavior; this only adds
+the cross-session chips.)
 
 ## How it works
 Claude Code hooks call `claude-tmux-state <state>` on lifecycle events
