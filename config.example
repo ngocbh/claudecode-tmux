@@ -1,0 +1,16 @@
+# claude-tmux config — copy to ~/.config/claude-tmux/config and uncomment to
+# override. Values are sourced by the scripts as POSIX sh, so use shell syntax.
+# Colors are tmux style strings (see `man tmux` -> STYLES); colourNNN or #rrggbb.
+
+# --- status-right chips (shown for sessions you're NOT currently viewing) ----
+# CT_RUN_CHIP='fg=colour016,bg=#ffa500,bold'   # working   (black on amber)
+# CT_ASK_CHIP='fg=colour016,bg=#f7768e,bold'   # needs you (black on red)
+# CT_IDLE_CHIP='fg=colour016'                   # idle/done (black text, no fill)
+# CT_SEP='#[fg=colour240]│#[default]'           # separator after the chips
+# CT_ICON_RUN='●'
+# CT_ICON_ASK='?'
+# CT_ICON_IDLE='✓'
+
+# --- window-tab tint (shown on the focused session's inactive tabs) ----------
+# CT_RUN_TAB='fg=#1a1b26,bg=#ff9e64,bold'       # working
+# CT_ASK_TAB='fg=#1a1b26,bg=#f7768e,bold'       # needs you

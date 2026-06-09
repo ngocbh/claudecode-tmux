@@ -1,0 +1,66 @@
+#!/bin/sh
+# claude-tmux-state — record this Claude Code pane's state, used two ways:
+#   1. the cross-session status-right chip (see claude-tmux-status), and
+#   2. tinting the tmux WINDOW tab the Claude lives in (orange=running,
+#      red=asking, default=idle).
+#
+# Usage: claude-tmux-state <running|asking|idle|clear>
+#   Wired to Claude Code hooks (SessionStart/UserPromptSubmit/PostToolUse ->
+#   running, Notification -> asking, Stop -> idle, SessionEnd -> clear).
+#
+# Keyed by tmux pane id ($TMUX_PANE). State file format: "<state>\t<window_id>"
+# — the window id lets claude-tmux-status re-tint the right window even after the
+# pane has died. No-op outside tmux.
+
+[ -n "$TMUX" ] && [ -n "$TMUX_PANE" ] || exit 0
+
+dir="$HOME/.cache/claude-tmux"
+
+# ---- tunables (override in ~/.config/claude-tmux/config) --------------------
+CT_RUN_TAB='fg=#1a1b26,bg=#ff9e64,bold'   # window-tab tint: working
+CT_ASK_TAB='fg=#1a1b26,bg=#f7768e,bold'   # window-tab tint: needs input
+_cfg="${XDG_CONFIG_HOME:-$HOME/.config}/claude-tmux/config"
+[ -r "$_cfg" ] && . "$_cfg"
+# ----------------------------------------------------------------------------
+
+id=$(printf '%s' "$TMUX_PANE" | tr -d '%')
+f="$dir/pane-$id"
+state="$1"
+
+# --- 1. update the per-pane state file ---------------------------------------
+if [ "$state" = "clear" ]; then
+  rm -f "$f"
+else
+  mkdir -p "$dir"
+  # Skip the rest when the state word is unchanged (PostToolUse fires on every
+  # tool); the file + window tint already reflect it.
+  [ -f "$f" ] && [ "$(cut -f1 "$f" 2>/dev/null)" = "$state" ] && exit 0
+fi
+
+win=$(tmux display-message -p -t "$TMUX_PANE" '#{window_id}' 2>/dev/null)
+[ "$state" = "clear" ] || printf '%s\t%s\n' "$state" "$win" >"$f"
+
+# --- 2. tint the window tab from the aggregate of its Claude panes -----------
+# Priority asking > running > idle. window-status-style only renders for
+# INACTIVE windows, so the tint shows exactly when that tab isn't focused.
+if [ -n "$win" ]; then
+  agg=idle
+  for pid in $(tmux list-panes -t "$win" -F '#{pane_id}' 2>/dev/null | tr -d '%'); do
+    s=$(cut -f1 "$dir/pane-$pid" 2>/dev/null)
+    if [ "$s" = asking ]; then
+      agg=asking
+      break
+    fi
+    [ "$s" = running ] && agg=running
+  done
+  case "$agg" in
+    asking)  tmux set-option -w -t "$win" window-status-style "$CT_ASK_TAB" 2>/dev/null ;;
+    running) tmux set-option -w -t "$win" window-status-style "$CT_RUN_TAB" 2>/dev/null ;;
+    *)       tmux set-option -wu -t "$win" window-status-style 2>/dev/null ;;
+  esac
+fi
+
+# Immediate status-line redraw so the chip updates without waiting for
+# status-interval.
+tmux refresh-client -S 2>/dev/null
+exit 0

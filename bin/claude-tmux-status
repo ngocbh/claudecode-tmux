@@ -1,0 +1,103 @@
+#!/bin/sh
+# claude-tmux-status — aggregate every Claude Code pane's state into a single
+# tmux status-right segment, visible from ALL sessions. Meant to be called from
+# status-right via #(...). Pairs with claude-tmux-state.
+#
+# Output (nothing if no Claudes are tracked):
+#   [1]work● [2]test? [3]exp✓ │
+#   amber ●=working   red ?=needs you   black ✓=idle/done   [N]=window index
+#
+# Only sessions you are NOT currently viewing are shown (the focused session is
+# covered by the window-tab tint). Self-healing prune of stale state files each
+# tick: pane gone, or pane fell back to a shell (Claude exited without
+# SessionEnd) -> remove file and re-tint its window.
+# State file format: "<state>\t<window_id>".
+
+dir="$HOME/.cache/claude-tmux"
+[ -d "$dir" ] || exit 0
+
+# ---- tunables (override any of these in ~/.config/claude-tmux/config) -------
+CT_RUN_CHIP='fg=colour016,bg=#ffa500,bold'   # status-right chip: working
+CT_ASK_CHIP='fg=colour016,bg=#f7768e,bold'   # status-right chip: needs input
+CT_IDLE_CHIP='fg=colour016'                   # status-right chip: idle/done
+CT_SEP='#[fg=colour240]│#[default]'           # separator after the chips
+CT_RUN_TAB='fg=#1a1b26,bg=#ff9e64,bold'       # window-tab tint: working
+CT_ASK_TAB='fg=#1a1b26,bg=#f7768e,bold'       # window-tab tint: needs input
+CT_ICON_RUN='●'
+CT_ICON_ASK='?'
+CT_ICON_IDLE='✓'
+_cfg="${XDG_CONFIG_HOME:-$HOME/.config}/claude-tmux/config"
+[ -r "$_cfg" ] && . "$_cfg"
+# ----------------------------------------------------------------------------
+
+# Recompute a window's tab tint from the aggregate of its still-tracked Claude
+# panes (asking > running > idle); unset when none remain.
+retint_window() {
+  w=$1
+  [ -n "$w" ] || return
+  agg=idle
+  for p in $(tmux list-panes -t "$w" -F '#{pane_id}' 2>/dev/null | tr -d '%'); do
+    s=$(cut -f1 "$dir/pane-$p" 2>/dev/null)
+    if [ "$s" = asking ]; then
+      agg=asking
+      break
+    fi
+    [ "$s" = running ] && agg=running
+  done
+  case "$agg" in
+    asking)  tmux set-option -w -t "$w" window-status-style "$CT_ASK_TAB" 2>/dev/null ;;
+    running) tmux set-option -w -t "$w" window-status-style "$CT_RUN_TAB" 2>/dev/null ;;
+    *)       tmux set-option -wu -t "$w" window-status-style 2>/dev/null ;;
+  esac
+}
+
+# Live map of every pane: "<id> <session> <window_index> <window_id> <command>".
+map=$(tmux list-panes -a -F '#{pane_id} #{session_name} #{window_index} #{window_id} #{pane_current_command}' 2>/dev/null | tr -d '%')
+
+# Sessions currently attached to a client (being viewed) — omit them here.
+attached=" $(tmux list-clients -F '#{session_name}' 2>/dev/null | tr '\n' ' ') "
+
+out=""
+for f in "$dir"/pane-*; do
+  [ -e "$f" ] || continue
+  id=${f##*/pane-}
+
+  line=$(printf '%s\n' "$map" | awk -v id="$id" '$1==id {print; exit}')
+  if [ -z "$line" ]; then
+    wid=$(cut -f2 "$f" 2>/dev/null)        # window id stored by the writer
+    rm -f "$f"                             # pane gone — prune
+    case "$wid" in @*) retint_window "$wid" ;; esac
+    continue
+  fi
+  # shellcheck disable=SC2086
+  set -- $line
+  sess=$2
+  win=$3
+  wid=$4
+  cmd=$5
+
+  # Claude no longer the pane's foreground process (back to a shell) => it
+  # exited/crashed without cleanup. Prune and clear the window tint.
+  case "$cmd" in
+    bash | zsh | sh | fish | ksh | dash | -bash | -zsh | -sh)
+      rm -f "$f"
+      retint_window "$wid"
+      continue
+      ;;
+  esac
+
+  # Skip Claudes in a session you're currently viewing (handled by window tint).
+  case "$attached" in *" $sess "*) continue ;; esac
+
+  state=$(cut -f1 "$f" 2>/dev/null)
+  case "$state" in
+    running) seg="#[$CT_RUN_CHIP][$win]$sess$CT_ICON_RUN#[default]" ;;
+    asking)  seg="#[$CT_ASK_CHIP][$win]$sess$CT_ICON_ASK#[default]" ;;
+    *)       seg="#[$CT_IDLE_CHIP][$win]$sess$CT_ICON_IDLE#[default]" ;;
+  esac
+  out="$out $seg"
+done
+
+# Trailing separator only when there's something to show.
+[ -n "$out" ] && printf '%s %s ' "$out" "$CT_SEP"
+exit 0
