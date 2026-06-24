@@ -120,10 +120,16 @@ README.md                user-facing docs
 - **Window-tint recompute logic is duplicated**: `claude-tmux-state` section 2 and
   `claude-tmux-status`'s `retint_window()`. Change both together.
 - **Self-healing prune** (in `claude-tmux-status`): a state file is dropped when its
-  pane is gone OR its `pane_current_command` is a shell (Claude exited/crashed back to
-  a prompt). The window is re-tinted using the stored window id. Don't switch to a
-  positive "is it Claude?" match — matching the shell set is what makes it safe to never
-  prune a live Claude (a running TUI never reports a bare shell as its pane command).
+  pane is gone OR its `pane_current_command` is a shell **and** the pane's process
+  tree has no non-shell descendants. The shell-name check alone is wrong for builds
+  that launch Claude via a wrapper script (e.g. `bash …/claude --…`, common on
+  managed installs): `pane_current_command` reports `bash` for the lifetime of the
+  session, so without the descendant check the reader prunes every state file on the
+  very next tick. The descendant check uses a single cached `ps -eo pid,ppid,comm`
+  pass (lazy — only built when at least one pane looks idle) and walks the pane
+  subtree skipping intermediate shell wrappers. The window is re-tinted using the
+  stored window id. Don't switch to a positive "is it Claude?" match — matching the
+  shell set is what makes it cheap, and the descendant probe is what makes it safe.
 
 ## tmux gotchas to remember
 

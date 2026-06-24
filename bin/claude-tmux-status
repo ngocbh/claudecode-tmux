@@ -9,8 +9,8 @@
 #
 # Only sessions you are NOT currently viewing are shown (the focused session is
 # covered by the window-tab tint). Self-healing prune of stale state files each
-# tick: pane gone, or pane fell back to a shell (Claude exited without
-# SessionEnd) -> remove file and re-tint its window.
+# tick: pane gone, or pane fell back to a shell with no non-shell descendants
+# (Claude exited without SessionEnd) -> remove file and re-tint its window.
 # State file format: "<state>\t<window_id>".
 
 dir="$HOME/.cache/claude-tmux"
@@ -52,11 +52,51 @@ retint_window() {
   esac
 }
 
-# Live map of every pane: "<id> <session> <window_index> <window_id> <command>".
-map=$(tmux list-panes -a -F '#{pane_id} #{session_name} #{window_index} #{window_id} #{pane_current_command}' 2>/dev/null | tr -d '%')
+# Live map of every pane: "<id> <session> <window_index> <window_id> <command> <pid>".
+# pid lets us walk the pane's process tree below to detect a Claude binary that
+# was launched via a shell wrapper (where pane_current_command stays "bash").
+map=$(tmux list-panes -a -F '#{pane_id} #{session_name} #{window_index} #{window_id} #{pane_current_command} #{pane_pid}' 2>/dev/null | tr -d '%')
 
 # Sessions currently attached to a client (being viewed) — omit them here.
 attached=" $(tmux list-clients -F '#{session_name}' 2>/dev/null | tr '\n' ' ') "
+
+# Cached snapshot of the process table (pid ppid comm). Built lazily — only
+# panes that look idle (pane_current_command is a bare shell) need this, so
+# users without a wrapper-launched Claude pay nothing.
+_proc_cache=""
+
+# Does pid $1 have any descendant whose `comm` is NOT a shell? Used to detect a
+# live Claude launched via a wrapper script (the pane's foreground process is
+# the wrapper bash, but Claude itself is a child or grandchild). Returns 0 if a
+# non-shell descendant exists.
+has_nonshell_descendant() {
+  root=$1
+  [ -n "$root" ] || return 1
+  [ -n "$_proc_cache" ] || _proc_cache=$(ps -eo pid=,ppid=,comm= 2>/dev/null)
+  [ -n "$_proc_cache" ] || return 1   # ps unavailable — caller decides default
+  # BFS over descendants. Frontier shrinks each round; bounded by pane subtree.
+  frontier=$root
+  while [ -n "$frontier" ]; do
+    next=$(printf '%s\n' "$_proc_cache" | awk -v F=" $(echo $frontier) " '
+      BEGIN { n = split(F, a, " "); for (i=1;i<=n;i++) if (a[i]!="") p[a[i]]=1 }
+      ($2 in p) {
+        # Bare-shell child → recurse; non-shell → success.
+        c = $3
+        if (c=="bash" || c=="zsh" || c=="sh" || c=="fish" || c=="ksh" ||
+            c=="dash" || c=="-bash" || c=="-zsh" || c=="-sh") {
+          kids = kids " " $1
+        } else {
+          print "FOUND"; exit
+        }
+      }
+      END { if (kids) print kids }
+    ')
+    case "$next" in *FOUND*) return 0 ;; esac
+    [ -n "$next" ] || return 1
+    frontier=$next
+  done
+  return 1
+}
 
 out=""
 for f in "$dir"/pane-*; do
@@ -76,14 +116,23 @@ for f in "$dir"/pane-*; do
   win=$3
   wid=$4
   cmd=$5
+  ppid=$6
 
   # Claude no longer the pane's foreground process (back to a shell) => it
   # exited/crashed without cleanup. Prune and clear the window tint.
+  # BUT: some Claude Code builds launch the binary through a shell wrapper
+  # (e.g. `bash /usr/local/bin/claude_code/.../claude --…`), in which case
+  # pane_current_command stays "bash" for the lifetime of the session. Before
+  # we prune, peek at the pane's process descendants — if any non-shell
+  # process is running underneath, Claude (or its proxies/podman attach) is
+  # still alive and we must NOT prune.
   case "$cmd" in
     bash | zsh | sh | fish | ksh | dash | -bash | -zsh | -sh)
-      rm -f "$f"
-      retint_window "$wid"
-      continue
+      if ! has_nonshell_descendant "$ppid"; then
+        rm -f "$f"
+        retint_window "$wid"
+        continue
+      fi
       ;;
   esac
 
