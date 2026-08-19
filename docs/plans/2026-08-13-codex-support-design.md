@@ -17,8 +17,8 @@ Install user-level Codex lifecycle hooks in
 `${CODEX_HOME:-$HOME/.codex}/hooks.json`. Merge them with `jq` using the same
 strip-and-readd strategy as the Claude Code hooks so reinstalling is idempotent
 and unrelated hooks survive. Codex requires the user to review and trust new
-non-managed hooks once through `/hooks`; the installer must explain that rather
-than bypassing trust.
+non-managed hooks at the **Hooks need review** startup gate (or later through
+`/hooks`); the installer must explain that rather than bypassing trust.
 
 The Codex transitions are:
 
@@ -50,6 +50,15 @@ Only Claude `asking` events use the Notification idle-timeout heuristic; Codex
 must not be suppressed merely because the previous state was idle. The state
 file stays exactly `state<TAB>window_id`.
 
+## Tab tint semantics
+
+tmux uses `window-status-style` for inactive tabs and
+`window-status-current-style` for the selected tab. The writer and the reader's
+self-healing retint path set both options to the same aggregate run/ask color,
+and unset both when the window becomes idle. Existing `CT_RUN_TAB` and
+`CT_ASK_TAB` settings apply to both; no additional knobs or format rewrites are
+needed.
+
 ## Limitations and recovery
 
 Codex has no documented hook when an approval is resolved, so an approved
@@ -64,7 +73,8 @@ or TUI scraping.
 
 ## Verification
 
-Add POSIX-shell regression tests for the source-aware writer and for sandboxed,
-double install/uninstall behavior with unrelated Claude and Codex hooks. Run
-`sh -n`, shellcheck when available, the regression scripts, and the repository's
+Add POSIX-shell regression tests for the source-aware writer, selected and
+inactive tab styles on a real isolated tmux server, and sandboxed double
+install/uninstall behavior with unrelated Claude and Codex hooks. Run `sh -n`,
+shellcheck when available, the regression scripts, and the repository's
 documented isolated installer smoke test.

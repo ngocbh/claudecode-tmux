@@ -5,11 +5,24 @@ set -eu
 BIN_DIR="$HOME/.local/bin"
 CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/claude-tmux"
 SETTINGS="$HOME/.claude/settings.json"
+CODEX_HOOKS="${CODEX_HOME:-$HOME/.codex}/hooks.json"
 TMUX_CONF="$HOME/.tmux.conf"
 MARK_BEGIN="# >>> claude-tmux >>>"
 MARK_END="# <<< claude-tmux <<<"
 
 log() { printf '\033[36m[claude-tmux]\033[0m %s\n' "$1"; }
+err() { printf '\033[31m[claude-tmux] error:\033[0m %s\n' "$1" >&2; }
+
+hooks_incomplete=0
+if command -v jq >/dev/null 2>&1; then
+  jq_available=1
+else
+  jq_available=0
+  if [ -f "$SETTINGS" ] || [ -f "$CODEX_HOOKS" ]; then
+    hooks_incomplete=1
+    err "INCOMPLETE UNINSTALL: jq not found; existing hook files will be left unchanged ($SETTINGS, $CODEX_HOOKS)"
+  fi
+fi
 
 # scripts
 rm -f "$BIN_DIR/claude-tmux-status" "$BIN_DIR/claude-tmux-state" "$BIN_DIR/claude-tmux-jump"
@@ -40,18 +53,46 @@ fi
 rm -rf "$CFG_DIR"
 
 # hooks
-if command -v jq >/dev/null 2>&1 && [ -f "$SETTINGS" ]; then
+remove_hooks() {
+  hook_file=$1
+  [ -f "$hook_file" ] || return 0
   tmp=$(mktemp)
-  jq '
+  if ! jq -e -s '
+    def require_single_object:
+      if (length == 1 and (.[0] | type) == "object")
+      then .[0]
+      else error("expected exactly one top-level JSON object")
+      end;
     def strip_ct: map(select((.hooks // [] | map(.command // "") | any(test("claude-tmux-state"))) | not));
+    require_single_object
+    |
     if (.hooks | type) == "object"
     then .hooks |= (with_entries(.value |= strip_ct) | with_entries(select((.value | length) > 0)))
     else . end
     | if (.hooks == {}) then del(.hooks) else . end
-  ' "$SETTINGS" >"$tmp" && mv "$tmp" "$SETTINGS"
-  log "removed hooks from $SETTINGS"
+  ' "$hook_file" >"$tmp"; then
+    rm -f "$tmp"
+    err "INCOMPLETE UNINSTALL: could not update $hook_file; expected exactly one top-level JSON object; original left unchanged"
+    return 1
+  fi
+  if ! mv "$tmp" "$hook_file"; then
+    rm -f "$tmp"
+    err "INCOMPLETE UNINSTALL: could not safely replace $hook_file; original left unchanged"
+    return 1
+  fi
+  log "removed hooks from $hook_file"
+}
+
+if [ "$jq_available" -eq 1 ]; then
+  remove_hooks "$SETTINGS" || hooks_incomplete=1
+  remove_hooks "$CODEX_HOOKS" || hooks_incomplete=1
 fi
 
 # state cache
 rm -rf "$HOME/.cache/claude-tmux"
+
+if [ "$hooks_incomplete" -ne 0 ]; then
+  err "INCOMPLETE UNINSTALL: hook cleanup did not finish; fix the errors above and re-run uninstall.sh"
+  exit 1
+fi
 log "uninstalled. (the cloned repo, if any, is left in place)"

@@ -12,6 +12,7 @@ BIN_DIR="$HOME/.local/bin"
 CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/claude-tmux"
 SNIPPET="$CFG_DIR/claude-tmux.tmux"
 SETTINGS="$HOME/.claude/settings.json"
+CODEX_HOOKS="${CODEX_HOME:-$HOME/.codex}/hooks.json"
 TMUX_CONF="$HOME/.tmux.conf"
 MARK_BEGIN="# >>> claude-tmux >>>"
 MARK_END="# <<< claude-tmux <<<"
@@ -68,27 +69,100 @@ if tmux info >/dev/null 2>&1; then
   tmux source-file "$TMUX_CONF" >/dev/null 2>&1 && log "reloaded running tmux" || true
 fi
 
-# --- 3. Claude Code hooks (merged into settings.json) -----------------------
+# --- 3. Claude Code + Codex hooks (merged without replacing user hooks) ------
 if command -v jq >/dev/null 2>&1; then
   log "merging hooks -> $SETTINGS"
   mkdir -p "$(dirname "$SETTINGS")"
-  [ -f "$SETTINGS" ] || printf '{}\n' >"$SETTINGS"
+  settings_input=$SETTINGS
+  settings_seed=
+  if [ ! -f "$SETTINGS" ]; then
+    settings_seed=$(mktemp)
+    printf '{}\n' >"$settings_seed"
+    settings_input=$settings_seed
+  fi
   tmp=$(mktemp)
-  jq --arg cmd "$BIN_DIR/claude-tmux-state" '
+  if ! jq -e -s --arg cmd "$BIN_DIR/claude-tmux-state" '
+    def require_single_object:
+      if (length == 1 and (.[0] | type) == "object")
+      then .[0]
+      else error("expected exactly one top-level JSON object")
+      end;
     def grp($arg): {hooks: [{type: "command", command: ($cmd + " " + $arg)}]};
     def strip_ct: map(select((.hooks // [] | map(.command // "") | any(test("claude-tmux-state"))) | not));
-    .hooks = (.hooks // {})
+    require_single_object
+    | .hooks = (.hooks // {})
     | .hooks.SessionStart     = ((.hooks.SessionStart     // []) | strip_ct) + [grp("idle")]
     | .hooks.UserPromptSubmit = ((.hooks.UserPromptSubmit // []) | strip_ct) + [grp("running")]
     | .hooks.PostToolUse      = ((.hooks.PostToolUse      // []) | strip_ct) + [grp("running")]
     | .hooks.Notification     = ((.hooks.Notification     // []) | strip_ct) + [grp("asking")]
     | .hooks.Stop             = ((.hooks.Stop             // []) | strip_ct) + [grp("idle")]
     | .hooks.SessionEnd       = ((.hooks.SessionEnd       // []) | strip_ct) + [grp("clear")]
-  ' "$SETTINGS" >"$tmp" && mv "$tmp" "$SETTINGS"
+  ' "$settings_input" >"$tmp"; then
+    rm -f "$tmp"
+    [ -z "$settings_seed" ] || rm -f "$settings_seed"
+    err "could not merge hooks into $SETTINGS: expected exactly one top-level JSON object; original left unchanged"
+    exit 1
+  fi
+  [ -z "$settings_seed" ] || rm -f "$settings_seed"
+  if ! mv "$tmp" "$SETTINGS"; then
+    rm -f "$tmp"
+    err "could not safely replace $SETTINGS; original left unchanged"
+    exit 1
+  fi
+
+  log "merging hooks -> $CODEX_HOOKS"
+  mkdir -p "$(dirname "$CODEX_HOOKS")"
+  codex_input=$CODEX_HOOKS
+  codex_seed=
+  if [ ! -f "$CODEX_HOOKS" ]; then
+    codex_seed=$(mktemp)
+    printf '{}\n' >"$codex_seed"
+    codex_input=$codex_seed
+  fi
+  tmp=$(mktemp)
+  if ! jq -e -s --arg cmd "$BIN_DIR/claude-tmux-state" '
+    def require_single_object:
+      if (length == 1 and (.[0] | type) == "object")
+      then .[0]
+      else error("expected exactly one top-level JSON object")
+      end;
+    def hook($arg): {
+      type: "command",
+      command: ($cmd + " " + $arg + " codex"),
+      timeout: 3,
+      async: false
+    };
+    def grp($arg): {hooks: [hook($arg)]};
+    def matched_grp($matcher; $arg): {matcher: $matcher, hooks: [hook($arg)]};
+    def strip_ct: map(select((.hooks // [] | map(.command // "") | any(test("claude-tmux-state"))) | not));
+    require_single_object
+    | .hooks = (.hooks // {})
+    | .hooks.SessionStart      = ((.hooks.SessionStart      // []) | strip_ct) + [matched_grp("^(startup|resume|clear)$"; "idle")]
+    | .hooks.UserPromptSubmit  = ((.hooks.UserPromptSubmit  // []) | strip_ct) + [grp("running")]
+    | .hooks.PreToolUse        = ((.hooks.PreToolUse        // []) | strip_ct) + [matched_grp("^request_user_input$"; "asking")]
+    | .hooks.PermissionRequest = ((.hooks.PermissionRequest // []) | strip_ct) + [grp("asking")]
+    | .hooks.PostToolUse       = ((.hooks.PostToolUse       // []) | strip_ct) + [grp("running")]
+    | .hooks.Stop              = ((.hooks.Stop              // []) | strip_ct) + [grp("idle")]
+    | .hooks.SessionEnd        = ((.hooks.SessionEnd        // []) | strip_ct) + [grp("clear")]
+  ' "$codex_input" >"$tmp"; then
+    rm -f "$tmp"
+    [ -z "$codex_seed" ] || rm -f "$codex_seed"
+    err "could not merge hooks into $CODEX_HOOKS: expected exactly one top-level JSON object; original left unchanged"
+    exit 1
+  fi
+  [ -z "$codex_seed" ] || rm -f "$codex_seed"
+  if ! mv "$tmp" "$CODEX_HOOKS"; then
+    rm -f "$tmp"
+    err "could not safely replace $CODEX_HOOKS; original left unchanged"
+    exit 1
+  fi
+  log "One-time Codex setup: restart Codex, then choose 'Review hooks' at the 'Hooks need review' prompt."
+  log "Review and trust the claude-tmux hooks; if you continue without trusting, open /hooks later."
 else
-  err "jq not found — skipped Claude Code hooks. Install jq and re-run, or add hooks manually (see README)."
+  err "jq not found — Claude Code and Codex hook setup was skipped. Install jq and re-run, or add hooks manually (see README)."
+  exit 1
 fi
 
 log "done."
-log "Run Claude in a tmux pane; its state shows as a window-tab tint + a chip"
+log "Run Claude Code or Codex in a tmux pane; its state shows as a window-tab tint + a chip"
 log "for other sessions on the right of the status bar. Tune ~/.config/claude-tmux/config."

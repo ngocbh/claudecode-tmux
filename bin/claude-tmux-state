@@ -1,15 +1,18 @@
 #!/bin/sh
-# claude-tmux-state — record this Claude Code pane's state, used two ways:
+# claude-tmux-state — record this Claude Code or Codex pane's state, used two ways:
 #   1. the cross-session status-right chip (see claude-tmux-status), and
-#   2. tinting the tmux WINDOW tab the Claude lives in (orange=running,
+#   2. tinting the tmux WINDOW tab the Claude/Codex session lives in (orange=running,
 #      red=asking, default=idle).
 #
-# Usage: claude-tmux-state <running|asking|idle|clear>
-#   Wired to Claude Code hooks (SessionStart/UserPromptSubmit/PostToolUse ->
-#   running, Notification -> asking, Stop -> idle, SessionEnd -> clear).
+# Usage: claude-tmux-state <running|asking|idle|clear> [claude|codex]
+#   Wired to Claude Code hooks (SessionStart -> idle,
+#   UserPromptSubmit/PostToolUse -> running, Notification -> asking,
+#   Stop -> idle, SessionEnd -> clear).
 #   Note: a Notification fires both for a genuine prompt AND for the 60s
-#   "waiting for your input" idle timeout; the latter is filtered out below so a
-#   finished, unattended session doesn't falsely turn red (see "asking" guard).
+#   "waiting for your input" idle timeout. The latter is treated as an idle
+#   signal (section 0): it never turns the tab red, and it downgrades a stuck
+#   "running" tint to idle — which is how a Ctrl+C interrupt gets cleared, since
+#   interrupting fires no hook of its own (Claude Code skips Stop on interrupt).
 #
 # Keyed by tmux pane id ($TMUX_PANE). State file format: "<state>\t<window_id>"
 # — the window id lets claude-tmux-status re-tint the right window even after the
@@ -29,21 +32,31 @@ _cfg="${XDG_CONFIG_HOME:-$HOME/.config}/claude-tmux/config"
 id=$(printf '%s' "$TMUX_PANE" | tr -d '%')
 f="$dir/pane-$id"
 state="$1"
+event_source=${2:-claude}
 
-# --- 0. drop the idle-timeout Notification (false "asking") ------------------
+# --- 0. special-case the Notification ("asking") -----------------------------
 # Claude Code fires Notification both for a genuine attention prompt (permission
-# / question) AND for the 60s "waiting for your input" idle timeout. Only the
-# former should turn the tab red. Treat a Notification as the idle timeout — and
-# no-op — when either:
+# / question) AND for the 60s "waiting for your input" idle timeout.
+#   * A genuine prompt should turn the tab red (asking).
+#   * The idle timeout is a reliable "Claude is idle now" signal, so instead of
+#     ignoring it we use it to CLEAR a stuck running tint by downgrading it to
+#     idle. This is what recovers from a Ctrl+C interrupt: interrupting a running
+#     task fires NO hook at all (Claude Code deliberately skips Stop on a user
+#     interrupt), so nothing else moves the pane off "running" — without this the
+#     tab stays orange until your next prompt. Cost: up to ~60s of stale tint
+#     (the idle-timeout delay) if you interrupt and then walk away.
+# Detect the idle timeout when either:
 #   (a) the hook payload on stdin says it's just waiting for input, or
 #   (b) the pane is already idle: a stopped Claude isn't running anything, so it
 #       cannot be genuinely blocked on you — the notification must be the timer.
-# (a) is best-effort (message wording may change); (b) is the reliable net.
-if [ "$state" = "asking" ]; then
+# (a) is best-effort (message wording may change) and is the only detector that
+# fires while the pane is "running" (the interrupt case); (b) is the reliable net
+# that keeps an already-idle pane from being flipped red.
+if [ "$state" = "asking" ] && [ "$event_source" = "claude" ]; then
   _msg=""
   [ -t 0 ] || _msg=$(cat 2>/dev/null)
-  case "$_msg" in *[Ww]aiting?for?your?input*) exit 0 ;; esac
-  [ "$(cut -f1 "$f" 2>/dev/null)" = idle ] && exit 0
+  case "$_msg" in *[Ww]aiting?for?your?input*) state=idle ;; esac
+  [ "$state" = asking ] && [ "$(cut -f1 "$f" 2>/dev/null)" = idle ] && exit 0
 fi
 
 # --- 1. update the per-pane state file ---------------------------------------
@@ -53,15 +66,23 @@ else
   mkdir -p "$dir"
   # Skip the rest when the state word is unchanged (PostToolUse fires on every
   # tool); the file + window tint already reflect it.
-  [ -f "$f" ] && [ "$(cut -f1 "$f" 2>/dev/null)" = "$state" ] && exit 0
+  # `cut -sf2` suppresses lines lacking the TAB delimiter, so a pre-format-change
+  # single-field file ("running\n", from an older version) yields empty and falls
+  # through to rewrite + retint — without this, the upgrade leaves the window
+  # stuck untinted until the state word actually changes.
+  [ -f "$f" ] \
+    && [ "$(cut -f1 "$f" 2>/dev/null)" = "$state" ] \
+    && [ -n "$(cut -sf2 "$f" 2>/dev/null)" ] \
+    && exit 0
 fi
 
 win=$(tmux display-message -p -t "$TMUX_PANE" '#{window_id}' 2>/dev/null)
 [ "$state" = "clear" ] || printf '%s\t%s\n' "$state" "$win" >"$f"
 
-# --- 2. tint the window tab from the aggregate of its Claude panes -----------
-# Priority asking > running > idle. window-status-style only renders for
-# INACTIVE windows, so the tint shows exactly when that tab isn't focused.
+# --- 2. tint the window tab from the aggregate of its Claude/Codex panes -----
+# Priority asking > running > idle. tmux uses window-status-style for inactive
+# tabs and window-status-current-style for the selected tab, so keep both in
+# sync with the aggregate state.
 if [ -n "$win" ]; then
   agg=idle
   for pid in $(tmux list-panes -t "$win" -F '#{pane_id}' 2>/dev/null | tr -d '%'); do
@@ -73,9 +94,18 @@ if [ -n "$win" ]; then
     [ "$s" = running ] && agg=running
   done
   case "$agg" in
-    asking)  tmux set-option -w -t "$win" window-status-style "$CT_ASK_TAB" 2>/dev/null ;;
-    running) tmux set-option -w -t "$win" window-status-style "$CT_RUN_TAB" 2>/dev/null ;;
-    *)       tmux set-option -wu -t "$win" window-status-style 2>/dev/null ;;
+    asking)
+      tmux set-option -w -t "$win" window-status-style "$CT_ASK_TAB" 2>/dev/null
+      tmux set-option -w -t "$win" window-status-current-style "$CT_ASK_TAB" 2>/dev/null
+      ;;
+    running)
+      tmux set-option -w -t "$win" window-status-style "$CT_RUN_TAB" 2>/dev/null
+      tmux set-option -w -t "$win" window-status-current-style "$CT_RUN_TAB" 2>/dev/null
+      ;;
+    *)
+      tmux set-option -wu -t "$win" window-status-style 2>/dev/null
+      tmux set-option -wu -t "$win" window-status-current-style 2>/dev/null
+      ;;
   esac
 fi
 
