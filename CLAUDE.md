@@ -10,13 +10,15 @@ session's run-state in the **tmux** status bar:
 - **status-right chips** (`[win]name●`) for your *other* sessions.
 
 State is driven by Claude Code **hooks** (not by scraping the TUI), so it's exact.
-There is no application to build and no test framework — "running it" means
-installing into tmux and watching the status bar.
+There is no application to build. `tests/check_tmux.py` provides standalone
+integration checks; ordinary use means installing into tmux and watching the bar.
 
 ## Layout
 
 ```
 bin/claude-tmux-state    writer  — called by hooks; writes state + tints the window tab
+bin/claude-tmux-codex    adapter — maps native Codex hook JSON to the shared writer
+bin/claude-tmux-ssh      SSH helper — forwards the login-node tmux socket to a compute node
 bin/claude-tmux-status   reader  — called by tmux status-right via #(); renders chips, self-heals
 bin/claude-tmux-jump     click handler — invoked from the MouseDown1Status binding (clickable chips); switches to a chip's session/window
 tmux/claude-tmux.tmux    snippet template (@STATUS_CMD@ / @CLICK_CONF@ substituted at install)
@@ -25,6 +27,7 @@ install.sh / uninstall.sh idempotent, non-destructive (curl|sh self-bootstraps v
 config.example           every tunable; copied to ~/.config/claude-tmux/config on install
 Makefile                 `make install` / `make uninstall`
 README.md                user-facing docs
+tests/check_tmux.py       isolated lifecycle/install checks and optional real SSH forwarding probe
 ```
 
 ## How it works (data flow)
@@ -38,7 +41,7 @@ README.md                user-facing docs
    be blocked on you) or when the payload message says it's just waiting for input.
    Without this, a finished, unattended session falsely flips to red ~60s after it
    stops. Don't naively re-map `Notification`→`asking` without keeping this guard.
-2. `claude-tmux-state` writes `~/.cache/claude-tmux/pane-<id>` (keyed by `$TMUX_PANE`),
+2. `claude-tmux-state` writes `~/.cache/claude-tmux/<server-host>-<server-pid>/pane-<id>` (keyed by `$TMUX_PANE`),
    file format **`<state>\t<window_id>`**, and sets `window-status-style` on its window
    (aggregate of all Claude panes in that window, priority asking > running > idle).
 3. `claude-tmux-status` runs from `status-right` every second: reads all state files,
@@ -57,6 +60,26 @@ README.md                user-facing docs
    not sourced, no mouse/binding touched).
 
 ## Conventions / invariants — preserve these
+
+- Codex hooks live at `${CODEX_HOME:-$HOME/.codex}/hooks.json`. The adapter maps
+  SessionStart to idle (compact to running), UserPromptSubmit/PostToolUse to running,
+  request_user_input PreToolUse to asking, Stop/Interrupt to
+  idle, and SessionEnd to clear. It returns `{}` and makes no permission decisions.
+  Explicit attention uses the writer's `--attention` flag to bypass Claude's idle
+  notification guard. Codex requires native hook trust before running the handlers.
+- Installation and removal preserve unrelated handlers even within a shared group.
+- Obtain the cache namespace from the connected tmux server's `#{host}-#{pid}`
+  in both writer and reader. A forwarded socket has a different local pathname;
+  the identity reported by its server is still the same. Do not key shared state
+  by bare pane ID or by the forwarding socket's temporary pathname.
+- `claude-tmux-ssh HOST [DIRECTORY]` forwards a tmux Unix socket with OpenSSH `-R`
+  and exports `TMUX`/`TMUX_PANE` in the compute-node shell. It requires shared home
+  storage and compatible tmux clients. Preserve private socket permissions,
+  normal SSH host verification, remote cleanup, and shell quoting. The helper
+  execs SSH so the local pane's foreground command remains `ssh`, not a waiting
+  shell that the self-healing reader would prune. Use exact node hostnames.
+- Across SSH, self-healing sees the SSH client, not the remote shell. SessionEnd
+  or closing SSH clears remote state; a remote crash may require explicit clear.
 
 - **POSIX sh only** (`#!/bin/sh`). No bashisms. Keep it portable (Linux + macOS).
 - **State file format is `state<TAB>window_id`.** Always read the state with
@@ -90,6 +113,11 @@ README.md                user-facing docs
   `0` as on). Don't move the mouse-enable outside the toggle: flipping a user's
   `mouse` setting unprompted is the one intrusive thing we promised not to do by
   default.
+- Check the connected server with `claude-tmux-jump --supported` before emitting
+  ranges or loading click bindings. The server must be 3.2+, even when the local
+  executable is newer. Tmux 2.7 drops status-right clicks before key dispatch;
+  no binding workaround can enable them. Use a separate newer server to preserve
+  existing sessions during an upgrade.
 - **Chip range encoding is `ct<window_id>`** (e.g. `ct@5`). The reader builds it
   from the live pane map's window id; `claude-tmux-jump` strips the `ct` tag and
   trusts the remaining `@N` as a server-unique window id (so it resolves the
@@ -130,10 +158,10 @@ README.md                user-facing docs
 - `status-right #()` output is computed **once by the server and shared across all
   clients** — it is *not* per-client. That's why "show only other sessions" is done by
   excluding `tmux list-clients` sessions, not by asking "which client is this".
-- `window-status-style` only renders for **inactive** windows (the active one uses
-  `window-status-current-style`), so the tab tint shows exactly when a tab isn't focused.
-  It also only takes effect if the user's `window-status-format` doesn't hardcode its own
-  colors (the tmux default does respect the style).
+- tmux uses `window-status-style` for inactive windows and
+  `window-status-current-style` for the active window. The indicator sets both;
+  each only takes effect if the user's corresponding window-status format does
+  not hardcode its own colors.
 - `status-interval` is integer seconds; **1 is the floor** (no sub-second polling). The
   writer calls `tmux refresh-client -S` for snappier same-client updates.
 - `#[range=...]` directives **are honored from `#()` command output**, not just from
@@ -161,6 +189,14 @@ README.md                user-facing docs
 There is no CI. Before considering a change done:
 
 - Syntax: `sh -n install.sh uninstall.sh bin/claude-tmux-*` (and `shellcheck` if available).
+- Run `python3 tests/check_tmux.py` for lifecycle, per-server cache isolation,
+  and installation/removal checks. From the login host, optionally add
+  `--remote-host EXACT_ALLOCATED_NODE` to verify real Unix-socket forwarding,
+  remote hook tinting, cwd quoting, and socket cleanup. Use only a compute node
+  covered by the user's current allocation. Tests never call a model API.
+- Run `python3 tests/check_clicks.py /path/to/tmux` to inject real mouse events
+  into a disposable terminal and verify chip jumps and ordinary tab selection.
+  This requires a tmux 3.2+ executable; it reproduced the click failure on 2.7.
 - **Sandbox the installer** so it never touches your real config or tmux server — run it
   against a throwaway `$HOME` and an isolated tmux socket:
 

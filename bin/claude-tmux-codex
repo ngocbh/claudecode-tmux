@@ -1,0 +1,29 @@
+#!/bin/sh
+# Adapt native Codex hook payloads to the shared tmux state writer.
+# Always emit JSON, including for Stop; never return an approval decision.
+
+if [ -n "${TMUX:-}" ] && [ -n "${TMUX_PANE:-}" ]; then
+  fields=$(jq -r '[.hook_event_name // "", .source // "", .tool_name // ""] | join("|")' 2>/dev/null) || fields=''
+  event=${fields%%|*}
+  rest=${fields#*|}
+  source=${rest%%|*}
+  tool=${rest#*|}
+  state=''
+  case "$event" in
+    SessionStart)
+      case "$source" in compact) state=running ;; *) state=idle ;; esac ;;
+    UserPromptSubmit | PostToolUse) state=running ;;
+    PreToolUse)
+      case "$tool" in
+        request_user_input | request_user_input_async | */request_user_input | */request_user_input_async)
+          state=asking ;;
+      esac ;;
+    Stop | Interrupt) state=idle ;;
+    SessionEnd) state=clear ;;
+  esac
+  if [ -n "$state" ]; then
+    # These are explicit lifecycle events, not Claude's idle notifications.
+    "$(dirname -- "$0")/claude-tmux-state" "$state" --attention </dev/null >/dev/null 2>&1 || true
+  fi
+fi
+printf '{}\n'

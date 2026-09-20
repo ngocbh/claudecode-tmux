@@ -13,13 +13,15 @@
 # SessionEnd) -> remove file and re-tint its window.
 # State file format: "<state>\t<window_id>".
 
-dir="$HOME/.cache/claude-tmux"
+server=$(tmux display-message -p '#{host}-#{pid}' 2>/dev/null) || exit 0
+case "$server" in ''|*[!a-zA-Z0-9_.-]*) exit 0 ;; esac
+dir="$HOME/.cache/claude-tmux/$server"
 [ -d "$dir" ] || exit 0
 
 # ---- tunables (override any of these in ~/.config/claude-tmux/config) -------
 CT_RUN_CHIP='fg=colour016,bg=#ffa500,bold'   # status-right chip: working
 CT_ASK_CHIP='fg=colour016,bg=#f7768e,bold'   # status-right chip: needs input
-CT_IDLE_CHIP='fg=colour016'                   # status-right chip: idle/done
+CT_IDLE_CHIP=''                              # status-right chip: idle/done (unstyled)
 CT_SEP='#[fg=colour240]│#[default]'           # separator after the chips
 CT_RUN_TAB='fg=#1a1b26,bg=#ff9e64,bold'       # window-tab tint: working
 CT_ASK_TAB='fg=#1a1b26,bg=#f7768e,bold'       # window-tab tint: needs input
@@ -30,6 +32,12 @@ CT_CLICKABLE=''                                # 1|true|yes|on => chips clickabl
 _cfg="${XDG_CONFIG_HOME:-$HOME/.config}/claude-tmux/config"
 [ -r "$_cfg" ] && . "$_cfg"
 # ----------------------------------------------------------------------------
+
+# Old servers cannot interpret user ranges or deliver clicks on status-right.
+case "$CT_CLICKABLE" in
+  1 | true | yes | on)
+    "$(dirname -- "$0")/claude-tmux-jump" --supported || CT_CLICKABLE='' ;;
+esac
 
 # Recompute a window's tab tint from the aggregate of its still-tracked Claude
 # panes (asking > running > idle); unset when none remain.
@@ -46,9 +54,15 @@ retint_window() {
     [ "$s" = running ] && agg=running
   done
   case "$agg" in
-    asking)  tmux set-option -w -t "$w" window-status-style "$CT_ASK_TAB" 2>/dev/null ;;
-    running) tmux set-option -w -t "$w" window-status-style "$CT_RUN_TAB" 2>/dev/null ;;
-    *)       tmux set-option -wu -t "$w" window-status-style 2>/dev/null ;;
+    asking)
+      tmux set-option -w -t "$w" window-status-style "$CT_ASK_TAB" 2>/dev/null
+      tmux set-option -w -t "$w" window-status-current-style "$CT_ASK_TAB" 2>/dev/null ;;
+    running)
+      tmux set-option -w -t "$w" window-status-style "$CT_RUN_TAB" 2>/dev/null
+      tmux set-option -w -t "$w" window-status-current-style "$CT_RUN_TAB" 2>/dev/null ;;
+    *)
+      tmux set-option -wu -t "$w" window-status-style 2>/dev/null
+      tmux set-option -wu -t "$w" window-status-current-style 2>/dev/null ;;
   esac
 }
 
@@ -94,7 +108,13 @@ for f in "$dir"/pane-*; do
   case "$state" in
     running) seg="#[$CT_RUN_CHIP][$win]$sess$CT_ICON_RUN#[default]" ;;
     asking)  seg="#[$CT_ASK_CHIP][$win]$sess$CT_ICON_ASK#[default]" ;;
-    *)       seg="#[$CT_IDLE_CHIP][$win]$sess$CT_ICON_IDLE#[default]" ;;
+    *)
+      if [ -n "$CT_IDLE_CHIP" ]; then
+        seg="#[$CT_IDLE_CHIP][$win]$sess$CT_ICON_IDLE#[default]"
+      else
+        seg="[$win]$sess$CT_ICON_IDLE"
+      fi
+      ;;
   esac
   # Make the chip a click target when enabled: wrap it in a tmux range tagged
   # with this Claude's window id ("@N"). The MouseDown1Status binding (in

@@ -5,6 +5,7 @@ set -eu
 BIN_DIR="$HOME/.local/bin"
 CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/claude-tmux"
 SETTINGS="$HOME/.claude/settings.json"
+CODEX_HOOKS="${CODEX_HOME:-$HOME/.codex}/hooks.json"
 TMUX_CONF="$HOME/.tmux.conf"
 MARK_BEGIN="# >>> claude-tmux >>>"
 MARK_END="# <<< claude-tmux <<<"
@@ -12,7 +13,7 @@ MARK_END="# <<< claude-tmux <<<"
 log() { printf '\033[36m[claude-tmux]\033[0m %s\n' "$1"; }
 
 # scripts
-rm -f "$BIN_DIR/claude-tmux-status" "$BIN_DIR/claude-tmux-state" "$BIN_DIR/claude-tmux-jump"
+rm -f "$BIN_DIR/claude-tmux-status" "$BIN_DIR/claude-tmux-state" "$BIN_DIR/claude-tmux-jump" "$BIN_DIR/claude-tmux-codex" "$BIN_DIR/claude-tmux-ssh"
 log "removed scripts from $BIN_DIR"
 
 # tmux source block (between markers)
@@ -43,13 +44,27 @@ rm -rf "$CFG_DIR"
 if command -v jq >/dev/null 2>&1 && [ -f "$SETTINGS" ]; then
   tmp=$(mktemp)
   jq '
-    def strip_ct: map(select((.hooks // [] | map(.command // "") | any(test("claude-tmux-state"))) | not));
+    def strip_ct: map(.hooks |= map(select((.command // "" | test("claude-tmux-state")) | not))) | map(select(.hooks | length > 0));
     if (.hooks | type) == "object"
     then .hooks |= (with_entries(.value |= strip_ct) | with_entries(select((.value | length) > 0)))
     else . end
     | if (.hooks == {}) then del(.hooks) else . end
   ' "$SETTINGS" >"$tmp" && mv "$tmp" "$SETTINGS"
   log "removed hooks from $SETTINGS"
+fi
+
+# Remove our Codex handlers while preserving unrelated handlers and metadata.
+if command -v jq >/dev/null 2>&1 && [ -f "$CODEX_HOOKS" ]; then
+  tmp=$(mktemp)
+  jq '
+    def strip_ct: map(.hooks |= map(select((.command // "" | test("claude-tmux-codex")) | not))) | map(select(.hooks | length > 0));
+    if (.hooks | type) == "object"
+    then .hooks |= (with_entries(.value |= strip_ct) | with_entries(select((.value | length) > 0)))
+    else . end
+    | if (.hooks == {}) then del(.hooks) else . end
+  ' "$CODEX_HOOKS" >"$tmp"
+  mv "$tmp" "$CODEX_HOOKS"
+  log "removed hooks from $CODEX_HOOKS"
 fi
 
 # state cache

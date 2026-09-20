@@ -1,0 +1,73 @@
+#!/bin/sh
+# Connect to a compute node while retaining the originating tmux pane.
+# Requires OpenSSH Unix-socket forwarding and a shared home directory.
+set -eu
+
+die() { printf 'claude-tmux-ssh: %s\n' "$*" >&2; exit 1; }
+quote() { printf "'"; printf '%s' "$1" | sed "s/'/'\\\\''/g"; printf "'"; }
+
+case "${1:-}" in
+  -h|--help)
+    printf 'Usage: claude-tmux-ssh HOST [DIRECTORY]\n'
+    exit 0 ;;
+  ''|-*) die 'Usage: claude-tmux-ssh HOST [DIRECTORY]' ;;
+esac
+[ "$#" -le 2 ] || die 'Usage: claude-tmux-ssh HOST [DIRECTORY]'
+host=$1
+directory=${2:-$(pwd -P)}
+[ -n "${TMUX:-}" ] && [ -n "${TMUX_PANE:-}" ] ||
+  die 'Run this command inside the login-node tmux pane.'
+
+socket=${TMUX%,*}
+socket=${socket%,*}
+case "$socket" in
+  /*) ;;
+  *) die 'Cannot determine the local tmux socket.' ;;
+esac
+case "$socket" in *:*) die 'Socket paths containing colons cannot be forwarded.' ;; esac
+[ -S "$socket" ] || die 'The local tmux socket is unavailable.'
+pane=$(tmux display-message -p -t "$TMUX_PANE" '#{pane_id}') || die 'Cannot reach the originating tmux pane.'
+server_pid=$(tmux display-message -p '#{pid}')
+case "$pane" in %*) ;; *) die 'Invalid tmux pane.' ;; esac
+
+# Use the same client across the forwarded socket. A cluster's /usr/bin/tmux
+# may be too old to speak to a newer server installed in the shared home.
+tmux_client=$(command -v tmux)
+case "$tmux_client" in /*) ;; *) die 'Cannot locate the tmux executable.' ;; esac
+tmux_bin_dir=$(dirname -- "$tmux_client")
+
+# mktemp creates a private directory on the exact compute host we will use.
+# Keep the default host-key checks and SSH authentication policy.
+remote_dir=$(ssh -n -o ConnectTimeout=10 "$host" 'umask 077; mktemp -d /tmp/claude-tmux.XXXXXXXXXX') ||
+  die 'Cannot prepare the remote socket directory.'
+case "$remote_dir" in
+  /tmp/claude-tmux.*)
+    suffix=${remote_dir#/tmp/claude-tmux.}
+    case "$suffix" in ''|*[!a-zA-Z0-9]*) die 'Unexpected remote socket directory.' ;; esac ;;
+  *) die 'Unexpected remote socket directory.' ;;
+esac
+remote_socket=$remote_dir/socket
+
+# Keep ssh as the foreground process so status self-healing does not mistake
+# a waiting shell wrapper for an exited agent. The remote parent cleans up the
+# private socket when its interactive child exits or the connection is lost.
+command="CT_TMUX_DIR=$(quote "$remote_dir")
+PATH=$(quote "$tmux_bin_dir"):\$PATH
+TMUX=$(quote "$remote_socket,$server_pid,0")
+TMUX_PANE=$(quote "$pane")
+export PATH TMUX TMUX_PANE
+cleanup() { rm -f -- \"\$CT_TMUX_DIR/socket\"; rmdir -- \"\$CT_TMUX_DIR\" 2>/dev/null || :; }
+trap cleanup 0
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if ! tmux display-message -p -t \"\$TMUX_PANE\" '#{pane_id}' >/dev/null 2>&1; then
+  printf 'claude-tmux-ssh: forwarded tmux socket is unavailable on this node.\n' >&2
+  exit 1
+fi
+cd -- $(quote "$directory") || exit
+/bin/bash -il"
+
+exec ssh -t -o ConnectTimeout=10 -o ExitOnForwardFailure=yes \
+  -o StreamLocalBindMask=0177 -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
+  -R "$remote_socket:$socket" "$host" "$command"

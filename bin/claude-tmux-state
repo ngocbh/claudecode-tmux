@@ -4,7 +4,8 @@
 #   2. tinting the tmux WINDOW tab the Claude lives in (orange=running,
 #      red=asking, default=idle).
 #
-# Usage: claude-tmux-state <running|asking|idle|clear>
+# Usage: claude-tmux-state <running|asking|idle|clear> [--attention]
+#   --attention bypasses idle-notification filtering for explicit Codex prompts.
 #   Wired to Claude Code hooks (SessionStart/UserPromptSubmit/PostToolUse ->
 #   running, Notification -> asking, Stop -> idle, SessionEnd -> clear).
 #   Note: a Notification fires both for a genuine prompt AND for the 60s
@@ -17,7 +18,11 @@
 
 [ -n "$TMUX" ] && [ -n "$TMUX_PANE" ] || exit 0
 
-dir="$HOME/.cache/claude-tmux"
+# The tmux server supplies its identity, including through an SSH-forwarded
+# socket. Separate servers can reuse pane IDs while sharing the same home.
+server=$(tmux display-message -p '#{host}-#{pid}' 2>/dev/null) || exit 0
+case "$server" in ''|*[!a-zA-Z0-9_.-]*) exit 0 ;; esac
+dir="$HOME/.cache/claude-tmux/$server"
 
 # ---- tunables (override in ~/.config/claude-tmux/config) --------------------
 CT_RUN_TAB='fg=#1a1b26,bg=#ff9e64,bold'   # window-tab tint: working
@@ -39,7 +44,7 @@ state="$1"
 #   (b) the pane is already idle: a stopped Claude isn't running anything, so it
 #       cannot be genuinely blocked on you — the notification must be the timer.
 # (a) is best-effort (message wording may change); (b) is the reliable net.
-if [ "$state" = "asking" ]; then
+if [ "$state" = "asking" ] && [ "${2:-}" != --attention ]; then
   _msg=""
   [ -t 0 ] || _msg=$(cat 2>/dev/null)
   case "$_msg" in *[Ww]aiting?for?your?input*) exit 0 ;; esac
@@ -60,8 +65,9 @@ win=$(tmux display-message -p -t "$TMUX_PANE" '#{window_id}' 2>/dev/null)
 [ "$state" = "clear" ] || printf '%s\t%s\n' "$state" "$win" >"$f"
 
 # --- 2. tint the window tab from the aggregate of its Claude panes -----------
-# Priority asking > running > idle. window-status-style only renders for
-# INACTIVE windows, so the tint shows exactly when that tab isn't focused.
+# Priority asking > running > idle. Set both styles because tmux uses
+# window-status-style for inactive tabs and window-status-current-style for the
+# active tab.
 if [ -n "$win" ]; then
   agg=idle
   for pid in $(tmux list-panes -t "$win" -F '#{pane_id}' 2>/dev/null | tr -d '%'); do
@@ -73,9 +79,15 @@ if [ -n "$win" ]; then
     [ "$s" = running ] && agg=running
   done
   case "$agg" in
-    asking)  tmux set-option -w -t "$win" window-status-style "$CT_ASK_TAB" 2>/dev/null ;;
-    running) tmux set-option -w -t "$win" window-status-style "$CT_RUN_TAB" 2>/dev/null ;;
-    *)       tmux set-option -wu -t "$win" window-status-style 2>/dev/null ;;
+    asking)
+      tmux set-option -w -t "$win" window-status-style "$CT_ASK_TAB" 2>/dev/null
+      tmux set-option -w -t "$win" window-status-current-style "$CT_ASK_TAB" 2>/dev/null ;;
+    running)
+      tmux set-option -w -t "$win" window-status-style "$CT_RUN_TAB" 2>/dev/null
+      tmux set-option -w -t "$win" window-status-current-style "$CT_RUN_TAB" 2>/dev/null ;;
+    *)
+      tmux set-option -wu -t "$win" window-status-style 2>/dev/null
+      tmux set-option -wu -t "$win" window-status-current-style 2>/dev/null ;;
   esac
 fi
 

@@ -20,4 +20,4 @@ run-shell -b 'h=$(printf "\043"); cur=$(tmux show -gv status-right); case "$cur"
 # gate is an if-shell that sources the config and tests the toggle; the bindings live
 # in a separate plain file (see that file's header for why) rather than being built
 # here inside a run-shell. Idempotent — re-sourcing just re-applies set/bind.
-if-shell '. "${XDG_CONFIG_HOME:-$HOME/.config}/claude-tmux/config" 2>/dev/null; case "${CT_CLICKABLE:-}" in 1|true|yes|on) exit 0 ;; *) exit 1 ;; esac' 'source-file @CLICK_CONF@'
+if-shell '. "${XDG_CONFIG_HOME:-$HOME/.config}/claude-tmux/config" 2>/dev/null; case "${CT_CLICKABLE:-}" in 1|true|yes|on) ;; *) exit 1 ;; esac; @JUMP_CMD@ --supported' 'source-file @CLICK_CONF@'
